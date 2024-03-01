@@ -38,10 +38,11 @@ void initTimerPWM( Tc *TCx )
 	while (GCLK->STATUS.bit.SYNCBUSY == 1);
 #endif
 
+#if( CONFIG_TIMER_PWM_RESOLUTION == 16 )
 	// Disable TCx
 	TCx->COUNT16.CTRLA.bit.ENABLE = 0;
 	syncTC_16(TCx);
-	// Set Timer counter Mode to 16 bits, normal PWM, prescaler 1/16
+	// Set Timer counter Mode to 16 bits, normal PWM, prescaler 1 (~732Hz with system core clock at 48Mhz)
 	TCx->COUNT16.CTRLA.reg = TC_CTRLA_MODE_COUNT16 | TC_CTRLA_WAVEGEN_NPWM | TC_CTRLA_PRESCALER_DIV1;
 	syncTC_16(TCx);
 	
@@ -51,6 +52,26 @@ void initTimerPWM( Tc *TCx )
 	syncTC_16(TCx);
 	
 	enableTimer(TCx);
+#else
+ 	// Disable TCx
+ 	TCx->COUNT8.CTRLA.bit.ENABLE = 0;
+ 	syncTC_8(TCx);
+ 	// Set Timer counter Mode to 8 bits, normal PWM, prescaler 1/4 (~46.8KHz with system core clock at 48MHz)
+ 	TCx->COUNT8.CTRLA.reg |= TC_CTRLA_MODE_COUNT8 | TC_CTRLA_WAVEGEN_NPWM | TC_CTRLA_PRESCALER_DIV4;
+ 	syncTC_8(TCx);
+
+ 	// Set the initial values
+ 	TCx->COUNT8.CC[0].reg = 0x00;
+ 	TCx->COUNT8.CC[1].reg = 0x00;
+ 	syncTC_8(TCx);
+
+ 	// Set PER to maximum counter value (resolution : 0xFF)
+ 	TCx->COUNT8.PER.reg = 0xFF;
+ 	syncTC_8(TCx);
+	
+	TCx->COUNT8.CTRLA.bit.ENABLE = 1;
+	syncTC_8(TCx);
+#endif
 }
 
 #ifdef USE_TCC_TIMERS
@@ -85,8 +106,15 @@ void PWMWrite( uint8_t pwm, uint16_t value)
 #ifdef USE_TCC_TIMERS
     if(p.tc != NOT_ON_TC){
 #endif
+
+#if( CONFIG_TIMER_PWM_RESOLUTION == 16 )
         p.tc->COUNT16.CC[p.wo].reg = value;
         syncTC_16(p.tc);
+#else
+        p.tc->COUNT8.CC[p.wo].reg = (uint8_t)((value & 0xFF00) >> 8);
+        syncTC_8(p.tc);
+#endif    
+
 #ifdef USE_TCC_TIMERS
     }
     else{
@@ -108,18 +136,47 @@ void setFreq( uint8_t pwm, uint16_t freq )
 #ifdef USE_TCC_TIMERS
     if(p.tc != NOT_ON_TC){
 #endif
-        uint8_t prescale = TC_CTRLA_PRESCALER_DIV256_Val;
-        if( freq > 500) prescale = TC_CTRLA_PRESCALER_DIV1_Val;
-        else if( freq > 250 ) prescale = TC_CTRLA_PRESCALER_DIV2_Val;
-        else if( freq > 140 ) prescale = TC_CTRLA_PRESCALER_DIV4_Val;
-        else if( freq > 75 ) prescale = TC_CTRLA_PRESCALER_DIV8_Val;
-        else if( freq > 25 ) prescale = TC_CTRLA_PRESCALER_DIV16_Val;
-        else if( freq > 7 ) prescale = TC_CTRLA_PRESCALER_DIV64_Val;
+        // The timer can produce a fixed number of frequencies from the available prescaler values.
+        // We need to find the appropriate prescaler that gives us the closest frequency to 'freq'.
 
+        // Prescaled frequencies, indexed by the corresponding TC_CTRLA_PRESCALER_DIV value.
+        // For 16-bit PWM at 48MHz system clock we get a range of 1Hz - 732Hz
+        // For 8-bit PWM at 48Mhz system clock we gat a range of 256Hz - 187KHz
+        const uint32_t prescaledFreq[] = {
+            SystemCoreClock >> (CONFIG_TIMER_PWM_RESOLUTION + 0),     // TC_CTRLA_PRESCALER_DIV1_Val     _U_(0x0)  
+            SystemCoreClock >> (CONFIG_TIMER_PWM_RESOLUTION + 1),     // TC_CTRLA_PRESCALER_DIV2_Val     _U_(0x1)
+            SystemCoreClock >> (CONFIG_TIMER_PWM_RESOLUTION + 2),     // TC_CTRLA_PRESCALER_DIV4_Val     _U_(0x2)
+            SystemCoreClock >> (CONFIG_TIMER_PWM_RESOLUTION + 3),     // TC_CTRLA_PRESCALER_DIV8_Val     _U_(0x3)
+            SystemCoreClock >> (CONFIG_TIMER_PWM_RESOLUTION + 4),     // TC_CTRLA_PRESCALER_DIV16_Val    _U_(0x4)
+            SystemCoreClock >> (CONFIG_TIMER_PWM_RESOLUTION + 6),     // TC_CTRLA_PRESCALER_DIV64_Val    _U_(0x5)
+            SystemCoreClock >> (CONFIG_TIMER_PWM_RESOLUTION + 8),     // TC_CTRLA_PRESCALER_DIV256_Val   _U_(0x6)
+            SystemCoreClock >> (CONFIG_TIMER_PWM_RESOLUTION + 10),    // TC_CTRLA_PRESCALER_DIV1024_Val  _U_(0x7)
+        };
+
+        // Start with the highest prescaler (lowest frequency)
+        uint8_t prescaler = TC_CTRLA_PRESCALER_DIV1024_Val;
+        while( prescaler > 0 &&
+            // Is the next higher frequency closer to 'freq' than the current frequency 
+            // (the mid-point between the frequencies is below the requested frequency)?
+            (prescaledFreq[prescaler - 1] + prescaledFreq[prescaler]) < freq * 2 ) {
+
+            // Select the next prescaler, this will give us a higher frequency
+            prescaler--;
+        }
+
+#if( CONFIG_TIMER_PWM_RESOLUTION == 16 )
         p.tc->COUNT16.CTRLA.bit.ENABLE = 0;
         syncTC_16(p.tc);
-        p.tc->COUNT16.CTRLA.bit.PRESCALER = prescale;
+        p.tc->COUNT16.CTRLA.bit.PRESCALER = prescaler;
         enableTimer(p.tc);
+#else
+        p.tc->COUNT8.CTRLA.bit.ENABLE = 0;
+        syncTC_8(p.tc);
+        p.tc->COUNT8.CTRLA.bit.PRESCALER = prescaler;
+        p.tc->COUNT8.CTRLA.bit.ENABLE = 1;
+        syncTC_8(p.tc);
+#endif
+
 #ifdef USE_TCC_TIMERS
     }
     else{

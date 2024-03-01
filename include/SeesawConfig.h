@@ -282,6 +282,12 @@
 #define CONFIG_TIMER_PWM_OUT11_PIN 0
 #endif
 
+#ifndef CONFIG_TIMER_PWM_RESOLUTION
+#define CONFIG_TIMER_PWM_RESOLUTION 16
+#else
+static_assert(CONFIG_TIMER_PWM_RESOLUTION == 16 || CONFIG_TIMER_PWM_RESOLUTION == 8, "Only 16-bit or 8-bit PWM resolution is supported");
+#endif
+
 #if CONFIG_TIMER
 	typedef struct _PWM
 	{
